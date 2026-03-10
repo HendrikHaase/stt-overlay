@@ -1,12 +1,17 @@
 """
 PyQt6 overlay window — frameless, always-on-top, non-focus-stealing.
 Plain QWidget subclass (no nativeEvent override).
+
+Click-through: WS_EX_TRANSPARENT makes the whole window pass clicks to whatever
+is underneath. A 50ms timer polls the cursor position; when it's over the close
+button the flag is temporarily removed so the button can be clicked.
 """
 
 import ctypes
+import ctypes.wintypes
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QKeyEvent, QPalette
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QKeyEvent
 from PyQt6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -19,8 +24,9 @@ from PyQt6.QtWidgets import (
 import config
 
 GWL_EXSTYLE      = -20
-WS_EX_NOACTIVATE = 0x08000000
-WS_EX_TOOLWINDOW = 0x00000080
+WS_EX_NOACTIVATE  = 0x08000000
+WS_EX_TOOLWINDOW  = 0x00000080
+WS_EX_TRANSPARENT = 0x00000020
 
 
 def _get_screen():
@@ -39,8 +45,10 @@ class OverlayWindow(QWidget):
     def __init__(self):
         super().__init__()
         self._lines: list[str] = []
+        self._click_through = False   # tracks current WS_EX_TRANSPARENT state
         self._setup_window()
         self._build_ui()
+        self._setup_hover_timer()
 
     def _setup_window(self):
         self.setWindowFlags(
@@ -51,9 +59,6 @@ class OverlayWindow(QWidget):
         self.setAutoFillBackground(False)
 
     def _build_ui(self):
-        # Outer container gives us a rounded semi-transparent background.
-        # WA_TranslucentBackground on the window makes the Qt window itself
-        # fully transparent; the container widget paints the visible background.
         container = QWidget(self)
         container.setObjectName("container")
         container.setStyleSheet(
@@ -73,14 +78,14 @@ class OverlayWindow(QWidget):
         bar.addWidget(title)
         bar.addStretch()
 
-        close_btn = QPushButton("X")
-        close_btn.setFixedSize(20, 20)
-        close_btn.setStyleSheet(
+        self._close_btn = QPushButton("X")
+        self._close_btn.setFixedSize(20, 20)
+        self._close_btn.setStyleSheet(
             "QPushButton { border: none; background: transparent; font-size: 12px; color: #666; }"
             "QPushButton:hover { color: #ff4444; }"
         )
-        close_btn.clicked.connect(self._on_close)
-        bar.addWidget(close_btn)
+        self._close_btn.clicked.connect(self._on_close)
+        bar.addWidget(self._close_btn)
         root.addLayout(bar)
 
         self._label = QLabel("")
@@ -94,6 +99,12 @@ class OverlayWindow(QWidget):
         self._status = QLabel("")
         self._status.setStyleSheet("font-size: 11px; color: #e05050; font-style: italic;")
         root.addWidget(self._status)
+
+    def _setup_hover_timer(self):
+        self._hover_timer = QTimer(self)
+        self._hover_timer.setInterval(50)   # 20 Hz — cheap, imperceptible latency
+        self._hover_timer.timeout.connect(self._update_click_through)
+        self._hover_timer.start()
 
     # ── Public API ────────────────────────────────────────────────────────────
     def show_recording(self):
@@ -116,9 +127,36 @@ class OverlayWindow(QWidget):
         self._reposition()
 
     def keyPressEvent(self, event: QKeyEvent):
-        # Swallow all key events — hotkeys are handled via Raw Input,
-        # and we don't want Space/Enter accidentally clicking the Close button.
         event.accept()
+
+    # ── Click-through logic ───────────────────────────────────────────────────
+    def _update_click_through(self):
+        """Enable click-through unless the cursor is over the close button."""
+        if not self.isVisible():
+            return
+
+        pt = ctypes.wintypes.POINT()
+        ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+
+        btn = self._close_btn
+        tl = btn.mapToGlobal(btn.rect().topLeft())
+        over_btn = (tl.x() <= pt.x <= tl.x() + btn.width() and
+                    tl.y() <= pt.y <= tl.y() + btn.height())
+
+        # Only call SetWindowLongW when the state actually changes
+        want_through = not over_btn
+        if want_through != self._click_through:
+            self._set_click_through(want_through)
+
+    def _set_click_through(self, enabled: bool):
+        hwnd = int(self.winId())
+        style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        if enabled:
+            style |= WS_EX_TRANSPARENT
+        else:
+            style &= ~WS_EX_TRANSPARENT
+        ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+        self._click_through = enabled
 
     # ── Internal helpers ──────────────────────────────────────────────────────
     def _ensure_visible(self):
