@@ -47,13 +47,23 @@ class OverlayWindow(QWidget):
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
         )
-        pal = self.palette()
-        pal.setColor(QPalette.ColorRole.Window, QColor("#1e1e1e"))
-        self.setPalette(pal)
-        self.setAutoFillBackground(True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAutoFillBackground(False)
 
     def _build_ui(self):
-        root = QVBoxLayout(self)
+        # Outer container gives us a rounded semi-transparent background.
+        # WA_TranslucentBackground on the window makes the Qt window itself
+        # fully transparent; the container widget paints the visible background.
+        container = QWidget(self)
+        container.setObjectName("container")
+        container.setStyleSheet(
+            "#container { background: rgba(20, 20, 20, 180); border-radius: 6px; }"
+        )
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(container)
+
+        root = QVBoxLayout(container)
         root.setContentsMargins(8, 4, 8, 8)
         root.setSpacing(4)
 
